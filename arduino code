@@ -1,0 +1,206 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <Servo.h>
+#include <HX711.h>
+
+// Initialize LCD
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Pin Definitions
+const int LOADCELL_DOUT_PIN = 2;
+const int LOADCELL_SCK_PIN = 3;
+const int TRIG_PIN = 4;           // Ultrasonic Trigger Pin
+const int ECHO_PIN = 7;           // Ultrasonic Echo Pin
+const int BUTTON_PIN = 5;         // Reward Button Pin
+const int RED_LED_PIN = 12;       // Red LED Pin
+const int GREEN_LED_PIN = 13;     // Green LED Pin
+
+// Initialize Load Cell
+HX711 scale;
+
+// Servos
+Servo servoEntry; // 1st Entry Servo (Pin 6)
+Servo servoDrop;  // Drop Mechanism Servo (Pin 10)
+Servo servoCoin;  // 3rd Servo for Prize / Coin Dispenser (Pin 11)
+
+int bottleCount = 0;
+
+const int ENTRY_OPEN_POS = 90;
+const int ENTRY_INITIAL_POS = 0;
+const int DROP_PLASTIC_POS = 90; 
+const int DROP_INITIAL_POS = 0;
+
+void setup() {
+  Serial.begin(9600);
+  
+  // Initialize LCD
+  lcd.init();
+  lcd.backlight();
+  
+  // Initialize Load Cell
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  scale.set_scale(2280.f); 
+  scale.tare();            
+
+  // Initialize Servos
+  servoEntry.attach(6);
+  servoDrop.attach(10);
+  servoCoin.attach(11);
+  
+  // Set initial positions
+  servoEntry.write(ENTRY_INITIAL_POS);
+  servoDrop.write(DROP_INITIAL_POS);
+  servoCoin.write(DROP_INITIAL_POS);
+  
+  // Initialize Sensors, Buttons & LEDs
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(RED_LED_PIN, OUTPUT);
+  pinMode(GREEN_LED_PIN, OUTPUT);
+
+  lcd.setCursor(0, 0);
+  lcd.print("Smart Rebarrel");
+  lcd.setCursor(0, 1);
+  lcd.print("System Ready    ");
+  delay(2000);
+  lcd.clear();
+}
+
+// Function for Filtered Ultrasonic Distance Readings (5cm to 7cm range)
+float getFilteredDistance() {
+  float total = 0;
+  int validReadings = 0;
+  
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+
+    long duration = pulseIn(ECHO_PIN, HIGH, 25000);
+    float distance = duration * 0.034 / 2;
+
+    if (duration > 0 && distance <= 400.0) {
+      total += distance;
+      validReadings++;
+    }
+    delay(5);
+  }
+
+  if (validReadings > 0) {
+    return total / validReadings;
+  } else {
+    return -1;
+  }
+}
+
+void loop() {
+  // Control LEDs based on bottle count (< 5 Red, >= 5 Green)
+  if (bottleCount >= 5) {
+    digitalWrite(GREEN_LED_PIN, HIGH); 
+    digitalWrite(RED_LED_PIN, LOW);    
+  } else {
+    digitalWrite(GREEN_LED_PIN, LOW);  
+    digitalWrite(RED_LED_PIN, HIGH);   
+  }
+
+  // 1. Display current count on LCD (Line 0)
+  lcd.setCursor(0, 0);
+  lcd.print("Bottles: ");
+  lcd.print(bottleCount);
+  lcd.print("/5    ");
+
+  // 2. Display "Insert Bottle" on LCD (Line 1)
+  lcd.setCursor(0, 1);
+  lcd.print("Insert Bottle   ");
+
+  // 3. Read weight from Load Cell (grams)
+  float weight = scale.get_units(3); 
+
+  if (weight > 3.0) {
+    if (weight >= 5.0 && weight <= 10.0) {
+      // VALID BOTTLE (5 to 10 grams)
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("VALID BOTTLE");
+      lcd.setCursor(0, 1);
+      lcd.print("Opening Entry...");
+      
+      servoEntry.write(ENTRY_OPEN_POS);
+      delay(1500);
+      servoEntry.write(ENTRY_INITIAL_POS);
+      
+      lcd.clear();
+    } else if (weight > 10.0) {
+      // HEAVY / INVALID
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("HEAVY! PLEASE");
+      lcd.setCursor(0, 1);
+      lcd.print("REMOVE BOTTLE   ");
+      delay(2000);
+      lcd.clear();
+    }
+  }
+
+  // 4. Ultrasonic Sensor Logic (5cm to 7cm range)
+  float distance = getFilteredDistance();
+  bool hasObject = (distance >= 5.0 && distance <= 7.0);
+
+  if (hasObject) {
+    bottleCount++; 
+    
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("BOTTLE DETECTED!");
+    lcd.setCursor(0, 1);
+    lcd.print("Count: ");
+    lcd.print(bottleCount);
+    lcd.print("/5      ");
+    
+    delay(1000);
+    
+    servoDrop.write(DROP_PLASTIC_POS);
+    delay(1500);
+    servoDrop.write(DROP_INITIAL_POS);
+    
+    lcd.clear();
+    delay(1000);
+  }
+
+  // 5. Check Button for Reward / Coin Dispenser
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    if (bottleCount >= 5) {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("REWARD CLAIMED!");
+      lcd.setCursor(0, 1);
+      lcd.print("Pushing Coin... ");
+      
+      servoCoin.write(90);
+      delay(1000);
+      servoCoin.write(0);
+      
+      // Rolling Subtraction: Subtract 5 and retain excess count for future claims
+      bottleCount -= 5; 
+      
+      delay(1500);
+      lcd.clear();
+    } else {
+      int missing = 5 - bottleCount;
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Not Yet Ready");
+      lcd.setCursor(0, 1);
+      lcd.print("Need ");
+      lcd.print(missing);
+      lcd.print(" more bot");
+      delay(2000);
+      lcd.clear();
+    }
+  }
+  
+  delay(100);
+}
